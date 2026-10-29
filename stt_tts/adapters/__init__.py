@@ -1,0 +1,17 @@
+"""Adapter registry. Add a class here to make it selectable in config."""
+
+from . import stub, zenoh_adapter as z
+
+AUDIO_INPUTS = {c.name: c for c in (stub.StubMic, stub.FileInput, z.ZenohAudioInput)}
+AUDIO_OUTPUTS = {c.name: c for c in (stub.StubSpeaker, stub.FileOutput, z.ZenohAudioOutput)}
+TEXT_SINKS = {c.name: c for c in (stub.StdoutSink, stub.FileSink, z.ZenohTextSink)}
+TEXT_SOURCES = {c.name: c for c in (stub.StdinSource, z.ZenohTextSource)}
+CONTROLS = {c.name: c for c in (stub.StubButton, stub.KeyboardButton, z.ZenohButton)}
+
+
+def build(registry: dict, name: str, cfg: dict):
+    try:
+        return registry[name](cfg)
+    except KeyError:
+        known = ", ".join(sorted(registry))
+        raise ValueError(f"Unknown adapter '{name}'. Known: {known}") from None
