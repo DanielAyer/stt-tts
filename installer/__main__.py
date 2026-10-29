@@ -4,6 +4,9 @@
     ./install.sh --cli        force the command-line installer
     ./install.sh --gui        require the GUI (fails if no display)
     ./install.sh --yes        continue past failed requirement checks
+    ./install.sh --modify     existing install: keep data and settings, refresh program
+    ./install.sh --replace    existing install: delete everything, install fresh
+    ./install.sh --llm        command line: also set up LLM integration
     ./install.sh --uninstall  remove what the installer created
 """
 
@@ -27,6 +30,13 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--gui", action="store_true", help="require the GUI installer")
     mode.add_argument("--uninstall", action="store_true", help="remove an install")
     parser.add_argument("--yes", action="store_true", help="continue if requirements fail")
+    existing = parser.add_mutually_exclusive_group()
+    existing.add_argument("--modify", action="store_true",
+                          help="if installed: keep data and settings, refresh program files")
+    existing.add_argument("--replace", action="store_true",
+                          help="if installed: delete everything and install fresh (no undo)")
+    parser.add_argument("--llm", action="store_true",
+                        help="ask the LLM integration questions during a command-line install")
     parser.add_argument("--zenoh", action="store_true", help="also pip install eclipse-zenoh")
     parser.add_argument("--app-dir", help="install location (CLI)")
     parser.add_argument("--data-dir", help="data store: models, transcripts, logs (CLI)")

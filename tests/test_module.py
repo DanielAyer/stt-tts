@@ -8,7 +8,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from installer import core  # noqa: E402
-from stt_tts import config  # noqa: E402
+from stt_tts import config, security  # noqa: E402
+from stt_tts.adapters.llm_http import check_url  # noqa: E402
 from stt_tts.discovery import parse_admin_key  # noqa: E402
 from stt_tts.pipeline import VoiceModule  # noqa: E402
 from stt_tts.state import Action, Controller, State  # noqa: E402
@@ -75,6 +76,58 @@ class DiscoveryTest(unittest.TestCase):
         ch = parse_admin_key("@/abc123/router/subscriber/voice/in/audio")
         self.assertEqual((ch.key, ch.kind), ("voice/in/audio", "subscriber"))
         self.assertIsNone(parse_admin_key("@/abc123/router/linkstate/routers"))
+
+
+class SecurityTest(unittest.TestCase):
+    def llm_cfg(self):
+        cfg = config.defaults()
+        cfg["llm"].update(enabled=True, api_key_secret="llm-api-key")
+        return cfg
+
+    def test_open_by_default(self):
+        cfg = config.defaults()
+        security.enforce(cfg)
+        self.assertTrue(security.InputGate(cfg).admit(None))
+
+    def test_credential_requires_input_security(self):
+        cfg = self.llm_cfg()
+        with self.assertRaises(security.SecurityError):
+            security.enforce(cfg)
+        cfg["security"]["input"]["enabled"] = True
+        security.enforce(cfg)
+
+    def test_keyless_llm_still_requires_input_security(self):
+        cfg = config.defaults()
+        cfg["llm"]["enabled"] = True
+        with self.assertRaises(security.SecurityError):
+            security.enforce(cfg)
+
+    def test_zenoh_input_needs_tls_when_credentialed(self):
+        cfg = self.llm_cfg()
+        cfg["security"]["input"]["enabled"] = True
+        cfg["input"]["adapters"] = ["zenoh"]
+        with self.assertRaises(security.SecurityError):
+            security.enforce(cfg)
+        cfg["zenoh"]["tls"]["enabled"] = True
+        security.enforce(cfg)
+
+    def test_gate_refuses_unlisted(self):
+        cfg = config.defaults()
+        cfg["security"]["input"].update(enabled=True, local_trusted=False, allowed=["cert:mic1"])
+        gate = security.InputGate(cfg)
+        self.assertTrue(gate.admit(security.Identity("cert", "mic1")))
+        self.assertFalse(gate.admit(security.Identity("cert", "mic2")))
+        self.assertFalse(gate.admit(None))
+        self.assertFalse(gate.admit_adapter("stub_mic", zenoh_tls=False))
+
+    def test_identity_must_be_cryptographic(self):
+        with self.assertRaises(security.SecurityError):
+            security.Identity.parse("mac:AA:BB:CC")
+
+    def test_plain_http_only_to_localhost(self):
+        self.assertTrue(check_url("http://192.168.1.20:8080/v1"))
+        self.assertEqual(check_url("http://127.0.0.1:8080/v1"), "")
+        self.assertEqual(check_url("https://api.example.com/v1"), "")
 
 
 class ManifestTest(unittest.TestCase):

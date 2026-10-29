@@ -13,7 +13,7 @@ import logging
 import time
 from typing import Callable
 
-from . import adapters, engines
+from . import adapters, engines, security
 from .state import Action, Controller, State
 
 log = logging.getLogger("stt_tts")
@@ -27,6 +27,8 @@ class VoiceModule:
         if "zenoh" in chosen and not cfg["zenoh"]["enabled"]:
             raise ValueError("A zenoh adapter is selected but zenoh.enabled is false. "
                              "Run: stt-tts config set zenoh.enabled true")
+        security.enforce(cfg)  # refuses a credentialed output behind open input
+        self.gate = security.InputGate(cfg)
         self.controller = Controller(cfg["control"]["after_reply"])
         self.stt = engines.build_stt(cfg)
         self.tts = engines.build_tts(cfg)
@@ -35,6 +37,11 @@ class VoiceModule:
         self.sinks = [adapters.build(adapters.TEXT_SINKS, n, cfg) for n in cfg["text"]["sinks"]]
         self.sources = [adapters.build(adapters.TEXT_SOURCES, n, cfg) for n in cfg["text"]["sources"]]
         self.control = adapters.build(adapters.CONTROLS, cfg["control"]["adapter"], cfg)
+        self.llm = None
+        if cfg["llm"]["enabled"]:
+            self.llm = adapters.LLM_SINK(cfg)
+            self.llm.on_reply = self.speak
+            self.sinks.append(self.llm)
         self.events: list[dict] = []
         self.on_event: Callable[[dict], None] | None = None
         self._pending_reply: list[str] = []
@@ -67,6 +74,8 @@ class VoiceModule:
                     out.stop()
                 spoken = " ".join(self._spoken)
                 self._pending_reply.clear()
+                if self.llm:
+                    self.llm.record_interrupt(spoken)
                 self.emit("interrupted", spoken_text=spoken)
 
     # --- button --------------------------------------------------------------
@@ -83,7 +92,11 @@ class VoiceModule:
         STUB: a real capture runs on its own thread while Listening and feeds
         the engine live; here we drain each input once at close.
         """
+        tls = self.cfg["zenoh"]["tls"]["enabled"]
         for adapter in self.inputs:
+            if not self.gate.admit_adapter(adapter.name, tls):
+                self.emit("input_refused", adapter=adapter.name)
+                continue
             for frame in adapter.frames():
                 partial = self.stt.feed(frame)
                 if partial:
@@ -100,9 +113,9 @@ class VoiceModule:
 
     def deliver(self, text: str, mode: str) -> None:
         meta = {"mode": mode, "t": time.time()}
+        self.emit("final", text=text, mode=mode)
         for sink in self.sinks:
             sink.send(text, meta)
-        self.emit("final", text=text, mode=mode)
 
     # --- TTS path ------------------------------------------------------------
 

@@ -53,6 +53,11 @@ def config_path() -> Path:
     return _xdg("XDG_CONFIG_HOME", HOME / ".config") / "stt-tts" / "config.toml"
 
 
+def secrets_path() -> Path:
+    """Fallback secret store when no system keyring is available (owner-only file)."""
+    return config_path().parent / "secrets.json"
+
+
 DEFAULTS: dict[str, Any] = {
     "paths": {},  # filled from default_paths() at load time
     "control": {
@@ -88,10 +93,51 @@ DEFAULTS: dict[str, Any] = {
         "voice": "af_heart",
         "sample_rate": 24000,
     },
+    "security": {
+        "input": {
+            # Allow-list overlay. Off = any device may send audio (open default).
+            # Forced on when an LLM is connected or an output uses a stored credential (see security.py).
+            "enabled": False,
+            # Identities allowed in, e.g. "cert:kitchen-mic" (certificate common name)
+            "allowed": [],
+            # Mic/button physically attached to this machine count as trusted
+            "local_trusted": True,
+        },
+        "output": {
+            # Sign-and-encrypt overlay for outputs that pass through untrusted hops
+            "seal": False,
+            "apply_to": ["zenoh", "file"],
+            # Recipient public keys (files); messages are encrypted to each one
+            "recipients": [],
+        },
+    },
+    "llm": {
+        # Optional profile: OpenAI-compatible HTTP endpoint (llama.cpp, Ollama, vLLM, cloud)
+        "enabled": False,
+        "backend": "llama.cpp",
+        "base_url": "http://localhost:8080/v1",
+        "model": "",
+        "system_prompt": "",
+        "stream": True,
+        # Name of the stored secret holding the API key ("" = no key needed)
+        "api_key_secret": "",
+        # HTTPS: required for any non-local host
+        "verify_tls": True,
+        "ca_file": "",
+        "client_cert": "",
+        "client_key": "",
+    },
     "zenoh": {
         "enabled": False,
         "mode": "client",
         "connect": ["tcp/localhost:7447"],
+        "tls": {
+            # Mutual TLS: required for allow-listing Zenoh devices by certificate
+            "enabled": False,
+            "root_ca": "",
+            "cert": "",
+            "key": "",
+        },
         "keys": {
             "in_audio": "voice/in/audio",
             "in_control": "voice/in/control",
