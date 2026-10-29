@@ -228,6 +228,8 @@ Allowed device certificates may publish audio and button presses; the module's o
 
 **Stored keys.** Kept in the system keyring if available, otherwise in an owner-only file next to the config (`stt-tts` refuses to read it if others can). Never in `config.toml`, never logged.
 
+**Certificates.** `stt-tts certs` runs a small private certificate authority for all of the above; see the next section.
+
 **Not covered.** If the LLM is given tools (running commands, sending messages), anyone speaking near an allowed mic is effectively instructing it. Keep tools off, or require confirmation for each action.
 
 ## Zenoh
@@ -263,6 +265,53 @@ Limits to know:
 - **Only declared entities appear.** A topic someone publishes with a plain `put()`, with no declared publisher and no live subscriber, won't be listed.
 - **The admin space must be readable.** It is by default.
 - **Layout varies by Zenoh version.** The parser expects the 1.x layout.
+
+## Certificates
+
+`stt-tts certs` is a small private certificate authority (CA), built on the `openssl` command. One CA signs every certificate in your setup, so each part trusts the others by checking against that one CA.
+
+| Command | What it does |
+| --- | --- |
+| `stt-tts certs init` | Create the CA (once). Its key is owner-only. |
+| `stt-tts certs issue NAME --server --host H [--host H2]` | Certificate for a server (LLM host, Zenoh router). List every hostname and IP clients will use. |
+| `stt-tts certs issue NAME` | Client certificate for a device. `NAME` becomes the identity you allow with `stt-tts security allow cert:NAME`. |
+| `stt-tts certs issue stt-tts --use-for zenoh` | The module's own client certificate, wired into its Zenoh mutual TLS settings (`--use-for llm` for the LLM link). |
+| `stt-tts certs trust llm` | Make the module trust the CA for the LLM link (`trust zenoh` for the router). |
+| `stt-tts certs list` | Issued certificates, their type, hosts and expiry. |
+
+Files live in `<data store>/pki`: `ca.crt` and `ca.key`, plus `issued/<name>/` holding `key.pem`, `cert.pem` and a copy of `ca.crt`. Keys are ECDSA P-256. Issued certificates last 825 days (`--days` to change); the CA lasts 10 years.
+
+- **Protect `ca.key`.** Anyone with it can mint certificates your whole setup trusts. Back it up somewhere safe: a replace (scorched earth) reinstall deletes the data store, and the CA with it.
+- **Copy each `key.pem` only to the machine it belongs to.**
+- **Hostnames must match.** The module connects only if the URL's host is one of the certificate's `--host` entries.
+
+### Example: TLS for llama.cpp on another machine
+
+On the stt-tts machine:
+
+```bash
+stt-tts certs init
+stt-tts certs issue ravensnest --server --host ravensnest --host ravensnest.local --host 192.168.1.50
+scp -r ~/.local/share/stt-tts/pki/issued/ravensnest you@ravensnest:~/llama-tls
+```
+
+On the LLM machine, build llama.cpp with `libssl-dev` installed (check with `llama-server --help | grep ssl`), then:
+
+```bash
+chmod 600 ~/llama-tls/key.pem
+llama-server -m model.gguf --host 0.0.0.0 --port 8080 \
+  --ssl-key-file ~/llama-tls/key.pem --ssl-cert-file ~/llama-tls/cert.pem
+```
+
+Back on the stt-tts machine:
+
+```bash
+curl --cacert ~/.local/share/stt-tts/pki/ca.crt https://ravensnest:8080/v1/models   # should answer
+stt-tts certs trust llm
+stt-tts setup llm        # base URL: https://ravensnest:8080/v1
+```
+
+llama-server's documented TLS options (`--ssl-key-file`, `--ssl-cert-file`) set the server's certificate only; they don't make it require one from clients. To authenticate the module to the server, also start llama-server with `--api-key` and enter that key in `stt-tts setup llm`. Requiring client certificates is a job for the planned reverse proxy.
 
 ## Stubbed endpoints
 
@@ -310,7 +359,8 @@ Notes from sizing the voice server: its RAM runs single-channel (one stick in tw
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests   # state machine, pipeline, config, security, rollback
+python3 -m unittest discover -s tests   # state machine, pipeline, config, security, rollback,
+                                        # and real TLS handshakes with stt-tts certs
 python3 -m stt_tts demo                 # run from the repo without installing
 ```
 
@@ -328,7 +378,6 @@ tests/                  unit tests (standard library only)
 - Implement the Moonshine and Kokoro engines and model download
 - Streaming LLM call (sentence-by-sentence TTS)
 - Output sealing with PyNaCl (sign, then encrypt to recipients)
-- `stt-tts certs`: create a small CA and per-device certificates (also the LLM server's certificate)
 - Reverse proxy support (e.g. Caddy) for a shared inference server: one address and one set of certificates for several services, certificate renewal without reloading the model
 - Real capture and playback adapters (PipeWire/ALSA, Bluetooth)
 - Threaded live capture so partial transcripts stream while you speak

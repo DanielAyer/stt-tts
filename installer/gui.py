@@ -518,6 +518,7 @@ class Installer(tk.Tk):
                 app_dir=str(Path(v["app_dir"].get()).expanduser()),
                 data_dir=str(data), model_dir=str(data / "models"),
                 transcript_dir=str(data / "transcripts"), log_dir=str(data / "logs"),
+                pki_dir=str(data / "pki"),
                 spool_dir=str(Path(v["spool_dir"].get()).expanduser()))
         for key, registry in (("input.adapters", adapters.AUDIO_INPUTS),
                               ("output.adapters", adapters.AUDIO_OUTPUTS),

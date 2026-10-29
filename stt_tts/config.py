@@ -42,6 +42,7 @@ def default_paths() -> dict[str, str]:
         "model_dir": str(data / "models"),
         "transcript_dir": str(data / "transcripts"),
         "log_dir": str(data / "logs"),
+        "pki_dir": str(data / "pki"),
         "spool_dir": str(default_spool_dir()),
     }
 
@@ -171,7 +172,12 @@ def load(path: Path | None = None) -> dict[str, Any]:
     cfg = defaults()
     if path.exists():
         with path.open("rb") as fh:
-            _merge(cfg, tomllib.load(fh))
+            user = tomllib.load(fh)
+        _merge(cfg, user)
+        # Paths added in later versions follow the user's data store
+        user_paths = user.get("paths", {})
+        if "data_dir" in user_paths and "pki_dir" not in user_paths:
+            cfg["paths"]["pki_dir"] = str(Path(user_paths["data_dir"]) / "pki")
     return cfg
 
 

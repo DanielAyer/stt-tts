@@ -10,6 +10,9 @@
   security status          show the security overlays and check the config
   security allow|deny ID   edit the input allow-list (cert:<name> or local:<adapter>)
   security acl             print a Zenoh router access-control block for the allow-list
+  certs init               create a private certificate authority (CA)
+  certs issue NAME         client cert for a device; --server --host H for a server
+  certs list | trust llm   list issued certs; make the module trust the CA
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ import argparse
 import json
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__, config
@@ -93,6 +97,64 @@ def cmd_setup(cfg, args) -> int:
         print("Saved to", config.save(cfg))
         return 0
     return 1
+
+
+def cmd_certs(cfg, args) -> int:
+    from . import pki, security
+
+    try:
+        if args.action == "init":
+            ca = pki.init_ca(cfg, common_name=args.cn or "stt-tts CA",
+                             days=args.days or pki.CA_DAYS, force=args.force)
+            print(f"Created CA: {ca}")
+            print(f"Its private key ({ca.parent / 'ca.key'}) can mint trusted certificates: keep it "
+                  "owner-only and back it up. A replace (scorched earth) reinstall deletes it.")
+            print("\nNext: stt-tts certs issue <name> [--server --host <host> ...]")
+            return 0
+
+        if args.action == "list":
+            certs = pki.list_issued(cfg)
+            if not certs:
+                print("No certificates issued yet.")
+            for c in certs:
+                days = (c.expires - datetime.now(timezone.utc)).days
+                where = f"  [{c.hosts}]" if c.hosts else ""
+                print(f"{c.name:<20} {c.kind:<7} expires {c.expires:%Y-%m-%d} ({days} days){where}")
+            return 0
+
+        if args.action == "trust":
+            changed = pki.trust(cfg, args.name)
+            security.enforce(cfg)
+            config.save(cfg)
+            print("Set " + ", ".join(changed) + f" to {pki.pki_dir(cfg) / 'ca.crt'}")
+            return 0
+
+        # issue
+        if not args.name:
+            raise ValueError("certs issue needs a name, e.g. ravensnest or kitchen-mic")
+        out = pki.issue(cfg, args.name, server=args.server, hosts=args.host,
+                        days=args.days or pki.LEAF_DAYS, force=args.force)
+        kind, hosts, expires = pki.describe(out / "cert.pem")
+        print(f"Issued {kind} certificate '{args.name}', valid until {expires:%Y-%m-%d}")
+        print(f"  {out}/key.pem   (private: copy only to that machine)")
+        print(f"  {out}/cert.pem")
+        print(f"  {out}/ca.crt")
+        if args.server:
+            print(f"  hosts: {hosts}")
+            print("\nOn that machine, for llama.cpp:")
+            print("  llama-server --ssl-key-file key.pem --ssl-cert-file cert.pem --host 0.0.0.0 ...")
+            print("Then on this machine: stt-tts certs trust llm  (and use https://<host>:<port>/v1)")
+        elif args.use_for:
+            changed = pki.use_for(cfg, args.use_for, out)
+            security.enforce(cfg)
+            config.save(cfg)
+            print("\nThe module now uses it: " + ", ".join(changed))
+        else:
+            print(f"\nAllow this device in: stt-tts security allow cert:{args.name}")
+        return 0
+    except pki.PKIError as exc:
+        print(f"stt-tts certs: {exc}", file=sys.stderr)
+        return 2
 
 
 def cmd_security(cfg, args) -> int:
@@ -183,6 +245,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("profile", choices=["llm"])
     p.add_argument("--remove", action="store_true")
     p.set_defaults(func=cmd_setup)
+    p = sub.add_parser("certs", help="private certificate authority")
+    p.add_argument("action", choices=["init", "issue", "list", "trust"])
+    p.add_argument("name", nargs="?", help="issue: certificate name; trust: llm or zenoh")
+    p.add_argument("--server", action="store_true", help="issue a server certificate")
+    p.add_argument("--host", action="append", help="server hostname or IP (repeatable)")
+    p.add_argument("--use-for", choices=["zenoh", "llm"],
+                   help="make this the module's own client certificate for that link")
+    p.add_argument("--days", type=int, help="validity in days")
+    p.add_argument("--cn", help="init: CA common name")
+    p.add_argument("--force", action="store_true", help="replace an existing CA or certificate")
+    p.set_defaults(func=cmd_certs)
     p = sub.add_parser("security")
     p.add_argument("action", choices=["status", "allow", "deny", "acl"])
     p.add_argument("identity", nargs="?")

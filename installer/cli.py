@@ -93,7 +93,8 @@ def run(args) -> int:
     if args.data_dir:
         data = Path(args.data_dir).expanduser()
         cfg["paths"].update(data_dir=str(data), model_dir=str(data / "models"),
-                            transcript_dir=str(data / "transcripts"), log_dir=str(data / "logs"))
+                            transcript_dir=str(data / "transcripts"), log_dir=str(data / "logs"),
+                            pki_dir=str(data / "pki"))
     plan = core.Plan(cfg=cfg, mode=mode, existing=existing, install_zenoh=args.zenoh,
                      config_file=config_file)
     if args.bin_dir:
