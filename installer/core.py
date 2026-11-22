@@ -28,7 +28,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from stt_tts import config as vm_config  # noqa: E402
-from stt_tts import credentials, profile  # noqa: E402
+from stt_tts import credentials, engines, profile  # noqa: E402
+from stt_tts.engines import manage  # noqa: E402
 
 Progress = Callable[[str], None]
 MANIFEST_NAME = "install-manifest.json"
@@ -126,6 +127,10 @@ class Plan:
     remove_llm: bool = False
     bin_dir: Path = field(default_factory=lambda: Path.home() / ".local" / "bin")
     config_file: Path = field(default_factory=vm_config.config_path)
+    # Called when an engine step fails: (step, detail) -> "retry" | "none" | "abort".
+    # "none" switches the failed engine(s) to the stub and carries on.
+    on_engine_failure: Callable[[str, str], str] | None = None
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def app_dir(self) -> Path:
@@ -258,8 +263,7 @@ def _install(plan: Plan, manifest: Manifest, progress: Progress) -> None:
         if result.returncode != 0:
             progress("  Zenoh install failed (network or pip missing); continuing without it.")
 
-    # STUB: model downloads (Moonshine, Kokoro) go here once engines are implemented.
-    progress("Models: skipped (engines are stubs)")
+    _install_engines(plan, python, progress)
 
     if plan.remove_llm:
         progress("Removing the LLM integration profile")
@@ -300,6 +304,63 @@ def _install(plan: Plan, manifest: Manifest, progress: Progress) -> None:
     for _, bak in manifest.backups:  # backups were only for rollback
         bak.unlink(missing_ok=True)
     progress("Done.")
+
+
+def _install_engines(plan: Plan, python: Path, progress: Progress) -> None:
+    """Install only the selected engines' packages into the venv, then fetch their models."""
+    cfg = plan.cfg
+    engines.ensure_options(cfg)
+    chosen = engines.selected(cfg)
+    progress(f"Engines: STT = {chosen['stt'].label}, TTS = {chosen['tts'].label}")
+
+    def attempt(step_name: str, action, fallback_kinds: list[str]) -> bool:
+        while True:
+            try:
+                action()
+                return True
+            except manage.StepFailed as exc:
+                if not exc.shown:
+                    progress(f"  {exc.step} failed:")
+                    for line in exc.detail.splitlines():
+                        progress(f"    {line}")
+                choice = plan.on_engine_failure(exc.step, exc.detail) if plan.on_engine_failure \
+                    else "none"
+                if choice == "retry":
+                    progress(f"  Retrying: {step_name}")
+                    continue
+                if choice == "abort":
+                    raise
+                for kind in fallback_kinds:
+                    failed = cfg[kind]["engine"]
+                    cfg[kind]["engine"] = "none"
+                    note = (f"{kind.upper()} engine '{failed}' was not installed ({exc.step.lower()} "
+                            f"failed); using none. Retry later with: stt-tts setup engines "
+                            f"--{kind} {failed}")
+                    plan.warnings.append(note)
+                    progress("  " + note)
+                return False
+
+    needing_packages = [k for k, s in chosen.items() if s.packages]
+    if needing_packages:
+        ok = attempt("engine packages",
+                     lambda: manage.install_packages(python, list(chosen.values()), progress),
+                     needing_packages)
+        if not ok:
+            return
+
+    fetch_kinds = [k for k, s in engines.selected(cfg).items() if s.fetch]
+    if not fetch_kinds:
+        return
+    temp_config = plan.app_dir / ".install-config.toml"  # the real config is written last
+    try:
+        for kind in fetch_kinds:
+            vm_config.save(cfg, temp_config)
+            attempt(f"{kind.upper()} models",
+                    lambda kind=kind: manage.fetch_models(python, plan.app_dir, temp_config,
+                                                          [kind], progress),
+                    [kind])
+    finally:
+        temp_config.unlink(missing_ok=True)
 
 
 def _make_venv(app: Path, manifest: Manifest, progress: Progress) -> Path:

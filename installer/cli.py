@@ -17,7 +17,7 @@ from pathlib import Path
 
 from . import core, sysreq
 from stt_tts import config as vm_config
-from stt_tts import profile
+from stt_tts import engines, profile
 
 
 def _interactive() -> bool:
@@ -51,6 +51,22 @@ def ask_existing(existing: core.Existing, args) -> str | None:
             if confirm == "replace":
                 return "replace"
             print("Not confirmed.")
+
+
+def ask_engine_failure(step: str, detail: str) -> str:
+    """An engine step failed: retry, fall back to none, or stop and clean up."""
+    if not _interactive():
+        return "none"
+    print(f"\n{step} failed (see above).")
+    while True:
+        answer = input("[r]etry, continue with [n]o engine (install it later), "
+                       "or [s]top and clean up? ").strip().lower()
+        if answer in ("r", "retry"):
+            return "retry"
+        if answer in ("n", "none", "no"):
+            return "none"
+        if answer in ("s", "stop", "q"):
+            return "abort"
 
 
 def ask_continue(fails: list[sysreq.Check], assume_yes: bool) -> bool:
@@ -95,8 +111,12 @@ def run(args) -> int:
         cfg["paths"].update(data_dir=str(data), model_dir=str(data / "models"),
                             transcript_dir=str(data / "transcripts"), log_dir=str(data / "logs"),
                             pki_dir=str(data / "pki"))
+    for kind in ("stt", "tts"):
+        choice = getattr(args, kind)
+        if choice:
+            cfg[kind]["engine"] = engines.spec(kind, choice).name
     plan = core.Plan(cfg=cfg, mode=mode, existing=existing, install_zenoh=args.zenoh,
-                     config_file=config_file)
+                     config_file=config_file, on_engine_failure=ask_engine_failure)
     if args.bin_dir:
         plan.bin_dir = Path(args.bin_dir).expanduser()
     manifest = core.Manifest()
@@ -122,6 +142,11 @@ def run(args) -> int:
                 print("  - " + p)
             return 1
 
+    chosen = engines.selected(cfg)
+    print(f"\nEngines: STT = {chosen['stt'].label}; TTS = {chosen['tts'].label}")
+    pkgs = engines.packages_for(chosen.values())
+    print("  packages: " + (", ".join(pkgs) if pkgs else "none")
+          + "  (change with --stt/--tts, or later: stt-tts setup engines)")
     verb = {"fresh": "Installing", "modify": "Updating", "replace": "Replacing with a fresh install"}[mode]
     print(f"\n{verb}:")
     for key, value in cfg["paths"].items():
@@ -138,8 +163,13 @@ def run(args) -> int:
         return 1
 
     advice = core.spool_advice(cfg["paths"]["spool_dir"])
+    for note in plan.warnings:
+        print("\nWarning: " + note)
     print("\nDone. Next steps:")
-    print("  stt-tts demo                      # walk the state machine with stubs")
+    print("  stt-tts say 'Hello there.' -o hello.wav   # try the TTS engine")
+    print("  stt-tts transcribe clip.wav       # try the STT engine (16 kHz mono WAV)")
+    print("  stt-tts demo                      # walk the button state machine")
+    print("  stt-tts setup engines             # change engines later")
     print("  stt-tts config show               # see every setting")
     print("  stt-tts setup llm                 # add LLM integration (sets up input security too)")
     print("  stt-tts security status           # check the security overlays")

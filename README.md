@@ -4,7 +4,7 @@ A local, bidirectional speech module for language models. Speech from any audio 
 
 ![Speech to text on top, text to speech beneath it, mirrored](docs/flow.svg)
 
-> **Status: scaffold.** The workflow, state machine, installer, config and Zenoh wiring are real. The speech engines and audio devices are **stubs**. Search the code for `STUB:` to find every endpoint to replace. See [Stubbed endpoints](#stubbed-endpoints) and [What our rig uses](#what-our-rig-uses).
+> **Status: early.** Speech engines are real, selectable plugins (Moonshine for STT and TTS, Kokoro for TTS, or none). Audio devices, the button and the live capture loop are still **stubs**: try the engines with `stt-tts say` and `stt-tts transcribe`. Search the code for `STUB:` to find every endpoint left to replace. See [Speech engines](#speech-engines), [Stubbed endpoints](#stubbed-endpoints) and [What our rig uses](#what-our-rig-uses).
 
 ## How it works
 
@@ -34,7 +34,7 @@ A local, bidirectional speech module for language models. Speech from any audio 
 | Python | 3.11 or newer (standard library only for the installer) |
 | Optional | `python3-venv` (recommended), `python3-tk` (GUI installer), `eclipse-zenoh` (Zenoh) |
 
-These minimums are estimates from published benchmarks of the planned engines, not measurements of this stack. The installer checks them and lets you continue below them.
+These minimums are estimates from published benchmarks of the engines, not measurements of this stack. No GPU is needed: every engine runs on the CPU. The installer checks them and lets you continue below them.
 
 ## Install
 
@@ -95,6 +95,8 @@ Cleanup is exact: the installer records every file and directory it creates and 
 | `--yes` | Continue past failed requirement checks |
 | `--modify` | If already installed: keep data and settings, refresh program files |
 | `--replace` | If already installed: delete everything and install fresh (no undo) |
+| `--stt ENGINE` | `moonshine` (default) or `none` |
+| `--tts ENGINE` | `moonshine` (default), `kokoro` or `none` |
 | `--llm` | Command line: also ask the LLM integration questions |
 | `--zenoh` | Also `pip install eclipse-zenoh` into the module's venv (needs network) |
 | `--app-dir PATH` | Install location (command line) |
@@ -138,6 +140,8 @@ Both installers run the same checks and the same install steps. They differ in h
 | --- | --- | --- |
 | Existing install: modify, replace or cancel | Yes | Yes (`--modify` / `--replace` without a terminal) |
 | Requirement table, continue or stop and clean up | Yes | Yes |
+| Choose speech engines, model and voice | Engines page | `--stt` / `--tts`, else Moonshine for both; later `stt-tts setup engines` |
+| Engine download fails: retry, continue without it, or stop and clean up | Dialog | Prompt (without a terminal: continue without it) |
 | Choose install location, data store, spool, config file | Browse dialogs | Flags, else defaults |
 | Choose audio inputs/outputs, text sinks/sources, button source | Checkboxes | Defaults; change later |
 | Behavior after a reply (go idle or reopen the mic) | Radio buttons | Default (idle); change later |
@@ -173,9 +177,12 @@ Everything selectable lives in `config.toml`; any key missing from the file fall
 | `text.sources` | `["stdin"]` | `stdin`, `zenoh` |
 | `control.adapter` | `stub_button` | `stub_button`, `keyboard` (Enter key), `zenoh` |
 | `control.after_reply` | `idle` | `idle`, `listening` |
-| `stt.engine` | `stub` | `stub` (Moonshine planned) |
-| `tts.engine` | `stub` | `stub` (Kokoro planned) |
-| `tts.voice` | `af_heart` | any Kokoro voice or blend, once implemented |
+| `stt.engine` | `moonshine` | `moonshine`, `none` |
+| `stt.moonshine.model` | `small-streaming` | `tiny-`, `base-`, `small-`, `medium-streaming` |
+| `tts.engine` | `moonshine` | `moonshine`, `kokoro`, `none` |
+| `tts.moonshine.voice` | `kokoro_af_heart` | see `stt-tts engines voices` |
+| `tts.kokoro.voice` | `af_heart` | one voice, or a blend: `af_heart:0.6, am_adam:0.4` |
+| `tts.<engine>.speed` | `1.0` | speaking rate |
 | `output.buffer_ms` | `300` | playback buffer; smaller makes interrupts snappier |
 | `zenoh.enabled` | `false` | `true`, `false` |
 | `zenoh.connect` | `["tcp/localhost:7447"]` | router endpoints |
@@ -184,6 +191,33 @@ Everything selectable lives in `config.toml`; any key missing from the file fall
 | `security.input.enabled` | `false` | input allow-list; forced on with an LLM or stored credential |
 | `security.input.allowed` | `[]` | `cert:<name>`, `local:<adapter>` |
 | `security.output.seal` | `false` | sign and encrypt Zenoh/file outputs (stub) |
+
+## Speech engines
+
+Engines are plugins. Each one declares its pip packages and models, and the installer downloads **only those of the engines you pick**, into the module's own venv and data store. Nothing is installed system-wide, and no GPU is needed.
+
+| Engine | Direction | Packages | Models (downloaded at install) | Notes |
+| --- | --- | --- | --- | --- |
+| Moonshine (default) | STT | `moonshine-voice` | Moonshine streaming model, from download.moonshine.ai | Streaming, low latency on CPU; English |
+| Moonshine TTS (default) | TTS | `moonshine-voice` (same package) | one voice, from download.moonshine.ai | Kokoro, Piper and ZipVoice voices; voice cloning |
+| Kokoro | TTS | `kokoro-onnx` | Kokoro-82M int8 and voices, from the kokoro-onnx GitHub release, SHA-256 checked | Blended voices |
+| None | either | nothing | nothing | Stub; keeps the module engine-agnostic |
+
+Picking Moonshine for both directions installs a single package. Models land in `<data store>/models/<engine>`, so Modify keeps them and Replace removes them; after install the module runs offline.
+
+If a download fails, the installer asks whether to **retry**, **continue without that engine** (it falls back to none and prints the command to try again), or **stop and clean up**.
+
+```bash
+stt-tts engines list                         # what's available and selected
+stt-tts setup engines                        # pick again; installs what's needed
+stt-tts setup engines --stt moonshine --tts kokoro
+stt-tts engines voices                       # voices of the selected TTS engine
+stt-tts config set tts.kokoro.voice "af_heart:0.6, am_adam:0.4"   # blend (Kokoro)
+stt-tts say "Hello there." -o hello.wav      # try the TTS engine
+stt-tts transcribe clip.wav                  # try the STT engine (any WAV; resampled to 16 kHz)
+```
+
+`setup engines` changes nothing unless every step succeeds. To add an engine, write an adapter (`STTEngine` or `TTSEngine` in `stt_tts/engines/base.py`), describe it with an `EngineSpec` in `stt_tts/engines/__init__.py`, and it appears in the installer and in `setup engines`.
 
 ## LLM integration
 
@@ -322,15 +356,12 @@ The main workflow (`stt_tts/pipeline.py`) is complete; every endpoint it calls i
 | Audio capture | `AudioInput` | `stub_mic` emits silence | `stt_tts/adapters/stub.py` |
 | Audio playback | `AudioOutput` | `stub_speaker` counts bytes | `stt_tts/adapters/stub.py` |
 | Button | `ControlInput` | `stub_button` never presses | `stt_tts/adapters/stub.py` |
-| Speech to text | `STTEngine` | returns a placeholder transcript | `stt_tts/engines.py` |
-| Text to speech | `TTSEngine` | returns silence sized to the text | `stt_tts/engines.py` |
 | Zenoh adapters | all five | written for zenoh 1.x, untested against a router | `stt_tts/adapters/zenoh_adapter.py` |
-| Model download | installer step | skipped | `installer/core.py` |
 | LLM network call | `LLMBridge.send` | request built and validated; reply is a placeholder | `stt_tts/adapters/llm_http.py` |
 | Output sealing | `Sealer.seal` | settings saved; not implemented | `stt_tts/security.py` |
 | Live capture and playback threads | pipeline | synchronous | `stt_tts/pipeline.py` |
 
-To add a device or engine, subclass the interface, give it a `name`, and register it in `stt_tts/adapters/__init__.py` or `stt_tts/engines.py`. It then appears in the config options and the GUI installer.
+To add a device or engine, subclass the interface, give it a `name`, and register it in `stt_tts/adapters/__init__.py` (engines: see [Speech engines](#speech-engines)). It then appears in the config options and the GUI installer.
 
 Try the workflow with stubs:
 
@@ -340,14 +371,14 @@ stt-tts demo
 
 ## What our rig uses
 
-The reference setup this module is being built for. Engine choices are planned, not yet implemented.
+The reference setup this module is being built for.
 
 | Part | Choice |
 | --- | --- |
 | Voice server | Intel Core i7-6700T (4 cores / 8 threads, AVX2), 8 GB DDR4-2133 |
 | LLM host | Separate machine with an NVIDIA RTX 3080 Ti Laptop GPU (16 GB), reached over the network |
-| Speech to text | [Moonshine Small Streaming](https://huggingface.co/moonshine-ai/moonshine-streaming-tiny) (123M parameters, MIT), on CPU |
-| Text to speech | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) int8 ONNX (Apache-2.0), on CPU, with a blended voice |
+| Speech to text | Moonshine Small Streaming (`moonshine-voice`, MIT), on CPU |
+| Text to speech | Moonshine TTS with the Kokoro `af_heart` voice, on CPU; Kokoro via `kokoro-onnx` when a blended voice is wanted |
 | Batch transcription (optional) | Parakeet TDT 0.6B v2 on the LLM host's GPU |
 | Spool | tmpfs at `/mnt/voice-spool`, 256 MB |
 | Transport | Zenoh, default key names |
@@ -375,7 +406,8 @@ tests/                  unit tests (standard library only)
 
 ## Roadmap
 
-- Implement the Moonshine and Kokoro engines and model download
+- Live capture loop: stream mic frames to Moonshine while listening, with partial transcripts
+- Moonshine TTS streaming (`push_text` / `cancel_stream`) for sentence-by-sentence replies and instant interrupts
 - Streaming LLM call (sentence-by-sentence TTS)
 - Output sealing with PyNaCl (sign, then encrypt to recipients)
 - Reverse proxy support (e.g. Caddy) for a shared inference server: one address and one set of certificates for several services, certificate renewal without reloading the model

@@ -84,15 +84,14 @@ DEFAULTS: dict[str, Any] = {
         # Where text to speak comes from: "stdin", "zenoh"
         "sources": ["stdin"],
     },
+    # Engines are plugins (stt_tts/engines). "none" = stub, bring your own.
+    # Per-engine options live in [stt.<engine>] / [tts.<engine>], e.g. [tts.kokoro].
     "stt": {
-        "engine": "stub",  # planned: "moonshine"
-        "model": "moonshine-small-streaming",
+        "engine": "moonshine",  # moonshine | none
     },
     "tts": {
-        "engine": "stub",  # planned: "kokoro"
-        "model": "kokoro-82m-int8",
-        "voice": "af_heart",
-        "sample_rate": 24000,
+        "engine": "moonshine",  # moonshine | kokoro | none
+        "sample_rate": 24000,   # set from the engine when it loads
     },
     "security": {
         "input": {

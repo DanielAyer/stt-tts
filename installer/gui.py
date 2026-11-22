@@ -4,7 +4,8 @@ Pages
   0. Existing install  - only if one is found: modify (rewalk, prefilled) or replace (scorched earth)
   1. Requirements      - results table; continue anyway or stop and clean up
   2. Locations         - install dir, data store, spool, config file (Browse dialogs)
-  3. Endpoints         - audio inputs/outputs, text sinks/sources, control, after-reply
+  3. Engines           - STT and TTS engine (installs only what they need), model, voice
+  4. Endpoints         - audio inputs/outputs, text sinks/sources, control, after-reply
   4. Zenoh             - router, mutual TLS, live channel discovery, key names
   5. LLM integration   - optional profile: backend, URL, model, API key, TLS
   6. Security          - input allow-list (forced on with LLM), output sealing
@@ -20,7 +21,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from . import core, sysreq
-from stt_tts import adapters, config as vm_config, credentials, profile, security
+from stt_tts import adapters, config as vm_config, credentials, engines, profile, security
+from stt_tts.engines.moonshine_meta import ARCH_NAMES
 from stt_tts.adapters.zenoh_adapter import zenoh_available
 
 PAD = {"padx": 8, "pady": 3}
@@ -58,7 +60,7 @@ class Installer(tk.Tk):
         self.next_btn.pack(side="right")
 
         self.pages = ([self.page_existing] if self.existing else []) + [
-            self.page_requirements, self.page_locations, self.page_endpoints,
+            self.page_requirements, self.page_locations, self.page_engines, self.page_endpoints,
             self.page_zenoh, self.page_llm, self.page_security, self.page_install]
         self.index = 0
         self.show()
@@ -217,6 +219,53 @@ class Installer(tk.Tk):
         check = sysreq.check_disk(Path(self.cfg["paths"]["app_dir"]))
         return check.ok or messagebox.askyesno("Low disk space",
                                                f"Only {check.found} free. Continue anyway?")
+
+    # --- engines -----------------------------------------------------------------
+
+    def page_engines(self) -> None:
+        self.heading("Speech engines",
+                     "Only the packages and models of the engines you pick are downloaded. "
+                     "\"None\" keeps the module engine-agnostic. Change later with: "
+                     "stt-tts setup engines")
+        engines.ensure_options(self.cfg)
+        for kind, title in (("stt", "Speech to text"), ("tts", "Text to speech")):
+            box = ttk.LabelFrame(self.body, text=title)
+            box.pack(fill="x", pady=4)
+            current = engines.spec(kind, self.cfg[kind]["engine"]).name
+            choice = self.var(f"engine.{kind}", current)
+            for row, name in enumerate(engines.names(kind)):
+                s = engines.spec(kind, name)
+                ttk.Radiobutton(box, text=s.label, value=name, variable=choice
+                                ).grid(row=row, column=0, sticky="w", **PAD)
+                pkgs = ", ".join(p.split(">")[0] for p in s.packages) or "nothing to download"
+                ttk.Label(box, text=f"{s.summary}  ({pkgs})", foreground=GREY, wraplength=480
+                          ).grid(row=row, column=1, sticky="w", padx=4)
+            box.columnconfigure(1, weight=1)
+
+        opts = ttk.LabelFrame(self.body, text="Engine options")
+        opts.pack(fill="x", pady=4)
+        m_stt = engines.options(self.cfg, engines.spec("stt", "moonshine"))
+        m_tts = engines.options(self.cfg, engines.spec("tts", "moonshine"))
+        k_tts = engines.options(self.cfg, engines.spec("tts", "kokoro"))
+        ttk.Label(opts, text="Moonshine STT model").grid(row=0, column=0, sticky="w", **PAD)
+        ttk.Combobox(opts, textvariable=self.var("opt.stt.moonshine.model", m_stt["model"]),
+                     values=ARCH_NAMES, state="readonly", width=20).grid(row=0, column=1, sticky="w")
+        ttk.Label(opts, text="bigger = more accurate, slower",
+                  foreground=GREY).grid(row=0, column=2, sticky="w", padx=6)
+        ttk.Label(opts, text="Moonshine TTS voice").grid(row=1, column=0, sticky="w", **PAD)
+        ttk.Entry(opts, textvariable=self.var("opt.tts.moonshine.voice", m_tts["voice"]), width=26
+                  ).grid(row=1, column=1, sticky="w")
+        ttk.Label(opts, text="e.g. kokoro_af_heart, piper_en_US-lessac-medium",
+                  foreground=GREY).grid(row=1, column=2, sticky="w", padx=6)
+        ttk.Label(opts, text="Kokoro voice or blend").grid(row=2, column=0, sticky="w", **PAD)
+        ttk.Entry(opts, textvariable=self.var("opt.tts.kokoro.voice", k_tts["voice"]), width=26
+                  ).grid(row=2, column=1, sticky="w")
+        ttk.Label(opts, text="e.g. af_heart or af_heart:0.6, am_adam:0.4",
+                  foreground=GREY).grid(row=2, column=2, sticky="w", padx=6)
+        ttk.Label(self.body, foreground=GREY, wraplength=740,
+                  text="Downloads need internet on this machine. If one fails, the installer asks "
+                       "whether to retry, continue without that engine, or stop and clean up."
+                  ).pack(anchor="w", pady=4)
 
     # --- page 3: endpoints ----------------------------------------------------
 
@@ -475,7 +524,9 @@ class Installer(tk.Tk):
                          if "install_zenoh" in self.vars else False,
                          llm=settings, remove_llm=was_on and settings is None,
                          config_file=Path(self.vars["config_file"].get()).expanduser()
-                         if "config_file" in self.vars else self.config_file)
+                         if "config_file" in self.vars else self.config_file,
+                         on_engine_failure=self.ask_engine_failure)
+        self.plan = plan
 
         def work():
             try:
@@ -487,6 +538,23 @@ class Installer(tk.Tk):
         threading.Thread(target=work, daemon=True).start()
         self.after(100, self.pump, msgs)
 
+    def ask_engine_failure(self, step: str, detail: str) -> str:
+        """Called on the install thread: ask on the window's thread and wait for the answer."""
+        answer: dict = {}
+        done = threading.Event()
+
+        def ask():
+            reply = messagebox.askyesnocancel(
+                f"{step} failed",
+                f"{detail}\n\nYes: retry\nNo: continue without this engine (install it later "
+                "with: stt-tts setup engines)\nCancel: stop and clean up")
+            answer["choice"] = {True: "retry", False: "none", None: "abort"}[reply]
+            done.set()
+
+        self.after(0, ask)
+        done.wait()
+        return answer["choice"]
+
     def pump(self, msgs: queue.Queue) -> None:
         while not msgs.empty():
             msg = msgs.get()
@@ -494,7 +562,9 @@ class Installer(tk.Tk):
                 status, detail = msg
                 if status == "done":
                     self.result = 0
-                    self.log.insert("end", "\nFinished. Try: stt-tts demo\n"
+                    for note in self.plan.warnings:
+                        self.log.insert("end", "\nWarning: " + note + "\n")
+                    self.log.insert("end", "\nFinished. Try: stt-tts say 'Hello there.' -o hello.wav\n"
                                            "Run ./install.sh again any time to modify or replace.\n")
                     if detail:
                         self.log.insert("end", "\n" + detail + "\n")
@@ -541,6 +611,13 @@ class Installer(tk.Tk):
                             root_ca=v["zenoh.tls.root_ca"].get().strip(),
                             cert=v["zenoh.tls.cert"].get().strip(),
                             key=v["zenoh.tls.key"].get().strip())
+        for kind in ("stt", "tts"):
+            if f"engine.{kind}" in v:
+                self.cfg[kind]["engine"] = v[f"engine.{kind}"].get()
+        for key in ("opt.stt.moonshine.model", "opt.tts.moonshine.voice", "opt.tts.kokoro.voice"):
+            if key in v:
+                _, kind, name, opt = key.split(".")
+                self.cfg[kind].setdefault(name, {})[opt] = v[key].get().strip()
         sec = self.cfg["security"]
         if "sec.in.enabled" in v:
             if hasattr(self, "allowed_text") and self.allowed_text.winfo_exists():

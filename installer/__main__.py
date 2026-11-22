@@ -7,6 +7,7 @@
     ./install.sh --modify     existing install: keep data and settings, refresh program
     ./install.sh --replace    existing install: delete everything, install fresh
     ./install.sh --llm        command line: also set up LLM integration
+    ./install.sh --tts kokoro choose engines (stt: moonshine|none; tts: moonshine|kokoro|none)
     ./install.sh --uninstall  remove what the installer created
 """
 
@@ -20,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from installer import core, display  # noqa: E402
 from stt_tts import config as vm_config  # noqa: E402
+from stt_tts import engines  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,6 +37,8 @@ def main(argv: list[str] | None = None) -> int:
                           help="if installed: keep data and settings, refresh program files")
     existing.add_argument("--replace", action="store_true",
                           help="if installed: delete everything and install fresh (no undo)")
+    parser.add_argument("--stt", choices=engines.names("stt"), help="STT engine (default moonshine)")
+    parser.add_argument("--tts", choices=engines.names("tts"), help="TTS engine (default moonshine)")
     parser.add_argument("--llm", action="store_true",
                         help="ask the LLM integration questions during a command-line install")
     parser.add_argument("--zenoh", action="store_true", help="also pip install eclipse-zenoh")

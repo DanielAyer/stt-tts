@@ -47,7 +47,9 @@ class StateMachineTest(unittest.TestCase):
 
 class PipelineTest(unittest.TestCase):
     def test_interrupt_reports_spoken_text(self):
-        m = VoiceModule(config.defaults())
+        cfg = config.defaults()
+        cfg["stt"]["engine"] = cfg["tts"]["engine"] = "none"
+        m = VoiceModule(cfg)
         m.sinks = []
         m.press(); m.press()
         m.speak("First sentence. Second sentence.", autoplay=False)

@@ -32,6 +32,7 @@ class VoiceModule:
         self.controller = Controller(cfg["control"]["after_reply"])
         self.stt = engines.build_stt(cfg)
         self.tts = engines.build_tts(cfg)
+        cfg["tts"]["sample_rate"] = self.tts.sample_rate  # outputs follow the engine's rate
         self.inputs = [adapters.build(adapters.AUDIO_INPUTS, n, cfg) for n in cfg["input"]["adapters"]]
         self.outputs = [adapters.build(adapters.AUDIO_OUTPUTS, n, cfg) for n in cfg["output"]["adapters"]]
         self.sinks = [adapters.build(adapters.TEXT_SINKS, n, cfg) for n in cfg["text"]["sinks"]]
