@@ -16,30 +16,44 @@ Tokens travel in each message's attachment. They are unguessable, but they are
 not encrypted on the wire: use TLS on the Zenoh link to keep them private. The
 planned crypto layer will replace them with signatures (fields reserved below).
 
-Keys (prefix "stt-tts", configurable as service.prefix):
+Keys (prefix "stt-tts", configurable as service.prefix). <id> is the doublet id
+the server assigns at registration; clients always use the key names it returns
+and never build them, so the naming scheme can change on the server alone.
+
+  service.naming = "readable" (default): <id> = <app>/<n>, e.g. "echo/1".
+      <app> is the requested name cleaned into a key-safe slug; <n> counts up
+      from 1 per app and is never reused while the server runs.
+  service.naming = "opaque": <id> = a random UUID (hex), which reveals nothing.
+
   <p>/register                  queryable  app -> server   request a doublet
   <p>/doublets                  queryable  anyone          list open doublets
   <p>/live/<id>/app             liveliness app holds it; when it vanishes, the doublet closes
   <p>/live/<id>/term            liveliness attached terminal holds it; when it vanishes, the lock frees
-  <p>/d/<id>/attach             queryable  terminal        take the publish lock
-  <p>/d/<id>/detach             queryable  terminal        release it
-  <p>/d/<id>/control            pub        terminal        button presses
-  <p>/d/<id>/audio/in           pub        terminal        16 kHz mono 16-bit PCM frames
-  <p>/d/<id>/audio/out          pub        server          TTS audio (rate in the encoding)
-  <p>/d/<id>/text/out           pub        server          transcripts (JSON)
-  <p>/d/<id>/text/in            pub        app             text to speak (plain text)
-  <p>/d/<id>/events             pub        server          state changes (JSON)
+  <p>/<id>/attach               queryable  terminal        take the publish lock
+  <p>/<id>/detach               queryable  terminal        release it
+  <p>/<id>/control              pub        terminal        button presses
+  <p>/<id>/audio/in             pub        terminal        16 kHz mono 16-bit PCM frames
+  <p>/<id>/audio/out            pub        server          TTS audio (rate in the encoding)
+  <p>/<id>/text/out             pub        server          transcripts (JSON)
+  <p>/<id>/text/in              pub        app             text to speak (plain text)
+  <p>/<id>/events               pub        server          state changes (JSON)
 """
 
 from __future__ import annotations
 
 import json
+import re
 import secrets
+import uuid
 from dataclasses import dataclass
 
-VERSION = 1
+VERSION = 2
 DEFAULT_PREFIX = "stt-tts"
 AUDIO_IN_ENCODING = "audio/L16;rate=16000"
+NAMING_MODES = ("readable", "opaque")
+# First key segments the service uses itself: an app slug may not take them.
+RESERVED = frozenset({"register", "doublets", "live"})
+_SLUG_MAX = 32
 
 
 def audio_out_encoding(rate: int) -> str:
@@ -54,22 +68,49 @@ def rate_from_encoding(encoding: str, default: int = 24000) -> int:
     return default
 
 
-def new_id() -> str:
-    return secrets.token_hex(4)
-
-
 def new_token() -> str:
     return secrets.token_urlsafe(24)
+
+
+def app_slug(name: str) -> str:
+    """Clean an app name into one key-safe segment: 'My App!' -> 'my-app'.
+
+    Keeps a-z, 0-9, '-' and '_'; anything else becomes '-'. Zenoh wildcards
+    ('*', '$', '?', '#') and '/' can't survive, so a name can never widen a
+    subscription or add key levels. Reserved segments get '-app' appended.
+    """
+    slug = re.sub(r"[^a-z0-9_-]+", "-", str(name).lower()).strip("-_")[:_SLUG_MAX].strip("-_")
+    slug = slug or "app"
+    return f"{slug}-app" if slug in RESERVED else slug
+
+
+class Namer:
+    """Assigns doublet ids. Not thread-safe: call it under the service's lock."""
+
+    def __init__(self, mode: str = "readable") -> None:
+        if mode not in NAMING_MODES:
+            raise ValueError(f"service.naming must be one of {', '.join(NAMING_MODES)}; "
+                             f"got {mode!r}")
+        self.mode = mode
+        self._last: dict[str, int] = {}
+
+    def allocate(self, name: str) -> str:
+        if self.mode == "opaque":
+            return uuid.uuid4().hex
+        slug = app_slug(name)
+        n = self._last.get(slug, 0) + 1  # never reused: a stale terminal can't hit a new app
+        self._last[slug] = n
+        return f"{slug}/{n}"
 
 
 @dataclass(frozen=True)
 class Keys:
     prefix: str
-    id: str
+    id: str  # "echo/1" (readable) or a UUID hex (opaque)
 
     @property
     def base(self) -> str:
-        return f"{self.prefix}/d/{self.id}"
+        return f"{self.prefix}/{self.id}"
 
     def __getattr__(self, name: str) -> str:  # attach, detach, control, events
         if name in ("attach", "detach", "control", "events"):
@@ -120,14 +161,14 @@ def live_pattern(prefix: str) -> str:
 
 
 def parse_live_key(prefix: str, key: str) -> tuple[str, str] | None:
-    """'stt-tts/live/<id>/app' -> (id, 'app')."""
+    """'stt-tts/live/echo/1/app' -> ('echo/1', 'app'). Ids may contain '/'."""
     head = f"{prefix}/live/"
     if not key.startswith(head):
         return None
-    parts = key[len(head):].split("/")
-    if len(parts) != 2 or parts[1] not in ("app", "term"):
+    did, _, role = key[len(head):].rpartition("/")
+    if not did or role not in ("app", "term"):
         return None
-    return parts[0], parts[1]
+    return did, role
 
 
 def loads(payload) -> dict:

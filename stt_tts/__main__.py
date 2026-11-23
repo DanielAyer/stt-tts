@@ -160,7 +160,7 @@ def cmd_doublets(cfg, args) -> int:
         print("No open doublets.")
     for d in found:
         holder = d["terminal"] or "free"
-        print(f"{d['id']}  {d['name']:<20} {d['state']:<10} terminal: {holder}")
+        print(f"{d['id']:<16} {d['name']:<20} {d['state']:<10} terminal: {holder}")
     return 0
 
 

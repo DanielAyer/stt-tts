@@ -315,20 +315,20 @@ stt-tts doublets                      # list open doublets from any machine on t
 
 ### Keys
 
-`<p>` is `service.prefix` (default `stt-tts`); `<id>` is the doublet id the service assigns.
+`<p>` is `service.prefix` (default `stt-tts`); `<id>` is the doublet id the service assigns. By default ids are readable, `<app>/<n>` (the first `echo` app gets `echo/1`, the next `echo/2`; numbers aren't reused while the service runs, so a stale terminal can't land on a new app). The app name is cleaned to a key-safe slug (lowercase letters, digits, `-`, `_`), so it can't contain Zenoh wildcards or extra key levels. Set `service.naming = "opaque"` for random UUID ids that reveal nothing. Clients always use the key names returned by `register` and `doublets`, never build them.
 
 | Key | Kind | Who writes | Payload |
 | --- | --- | --- | --- |
 | `<p>/register` | query | app | `{"name": "..."}` → id, `app_token`, the doublet's keys and formats |
 | `<p>/doublets` | query | anyone | list of open doublets: id, name, state, whether a terminal holds it |
-| `<p>/d/<id>/attach` | query | terminal | `{"terminal": "name"}` → `terminal_token`, or refused with `held_by` |
-| `<p>/d/<id>/detach` | query | terminal | `{"terminal_token": "..."}` |
-| `<p>/d/<id>/control` | pub | terminal | `{"op": "press"}` (the one context-sensitive button) |
-| `<p>/d/<id>/audio/in` | pub | terminal | 16 kHz mono 16-bit PCM, encoding `audio/L16;rate=16000` |
-| `<p>/d/<id>/text/out` | pub | service | `{"text", "doublet", "terminal", "t"}` when you finish speaking |
-| `<p>/d/<id>/text/in` | pub | app | UTF-8 text to speak |
-| `<p>/d/<id>/audio/out` | pub | service | PCM at the TTS rate, encoding `audio/L16;rate=24000`, paced in real time |
-| `<p>/d/<id>/events` | pub | service | `listening`, `partial`, `thinking`, `speaking`, `interrupted` (with `spoken_text`), `playback_done`, `idle`, `reply_cancelled`, `reply_dropped`, `closed` |
+| `<p>/<id>/attach` | query | terminal | `{"terminal": "name"}` → `terminal_token`, or refused with `held_by` |
+| `<p>/<id>/detach` | query | terminal | `{"terminal_token": "..."}` |
+| `<p>/<id>/control` | pub | terminal | `{"op": "press"}` (the one context-sensitive button) |
+| `<p>/<id>/audio/in` | pub | terminal | 16 kHz mono 16-bit PCM, encoding `audio/L16;rate=16000` |
+| `<p>/<id>/text/out` | pub | service | `{"text", "doublet", "terminal", "t"}` when you finish speaking |
+| `<p>/<id>/text/in` | pub | app | UTF-8 text to speak |
+| `<p>/<id>/audio/out` | pub | service | PCM at the TTS rate, encoding `audio/L16;rate=24000`, paced in real time |
+| `<p>/<id>/events` | pub | service | `listening`, `partial`, `thinking`, `speaking`, `interrupted` (with `spoken_text`), `playback_done`, `idle`, `reply_cancelled`, `reply_dropped`, `closed` |
 | `<p>/live/<id>/app`, `.../term` | liveliness | app, terminal | presence |
 
 A terminal should drop any audio it has buffered when it gets `interrupted`. The registration reply has a `server_public_key` field, `null` for now, reserved for end-to-end encryption.
@@ -345,6 +345,7 @@ stt-tts test-terminal clip.wav --doublet echo -o reply.wav
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `service.prefix` | `stt-tts` | root of every key above |
+| `service.naming` | `readable` | `readable` (`echo/1`) or `opaque` (random UUID) doublet ids |
 | `service.app_grace_s` | `30` | close a doublet if its app hasn't been seen for this long |
 
 ## Certificates

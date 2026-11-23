@@ -51,6 +51,7 @@ class VoiceService:
         self.cfg = cfg
         self.prefix = cfg["service"]["prefix"]
         self.grace_s = float(cfg["service"]["app_grace_s"])
+        self.namer = protocol.Namer(cfg["service"].get("naming", "readable"))
         self.lead_s = cfg["output"]["buffer_ms"] / 1000
         self.session = open_session(cfg)
         self.tts = engines.build_tts(cfg)
@@ -72,7 +73,8 @@ class VoiceService:
     def _on_register(self, query) -> None:
         request = protocol.loads(query.payload)
         name = str(request.get("name") or "app")[:64]
-        did = protocol.new_id()
+        with self.lock:
+            did = self.namer.allocate(name)
         d = Doublet(did, name, protocol.new_token(), protocol.Keys(self.prefix, did))
         runner = DoubletRunner(self, d)
         with self.lock:
