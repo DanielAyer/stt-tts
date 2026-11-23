@@ -7,6 +7,9 @@
   engines list|voices      show engines (and the TTS engine's voices)
   engines fetch            download the selected engines' models
   setup engines            pick engines; installs only what they need
+  serve                    run the doublet voice service on Zenoh
+  doublets                 list open doublets
+  test-app / test-terminal test tools for the service (see stt_tts/client.py)
   config show|get|set|path view or change settings after install
   channels                 list Zenoh channels a router knows about
   channels --assign        pick each zenoh.keys.* value from that list
@@ -120,6 +123,55 @@ def cmd_say(cfg, args) -> int:
           f"({cfg['tts']['engine']}, {tts.sample_rate} Hz)")
     tts.close()
     return 0
+
+
+def cmd_serve(cfg, args) -> int:
+    """Run the doublet voice service on Zenoh until Ctrl-C."""
+    import signal
+    import threading
+
+    from .service import VoiceService
+
+    logging.getLogger("stt_tts").setLevel(logging.INFO)
+    service = VoiceService(cfg)
+    print(f"stt-tts serving on Zenoh ({', '.join(cfg['zenoh']['connect'])}), prefix "
+          f"'{cfg['service']['prefix']}'. Engines: STT = {cfg['stt']['engine']}, "
+          f"TTS = {cfg['tts']['engine']}. Ctrl-C to stop.", flush=True)
+    stop = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    try:
+        stop.wait()
+    except KeyboardInterrupt:
+        pass
+    service.close()
+    return 0
+
+
+def cmd_doublets(cfg, args) -> int:
+    from .adapters.zenoh_adapter import open_session
+    from .client import list_doublets
+
+    session = open_session(cfg)
+    try:
+        found = list_doublets(session, cfg["service"]["prefix"])
+    finally:
+        session.close()
+    if not found:
+        print("No open doublets.")
+    for d in found:
+        holder = d["terminal"] or "free"
+        print(f"{d['id']}  {d['name']:<20} {d['state']:<10} terminal: {holder}")
+    return 0
+
+
+def cmd_test_app(cfg, args) -> int:
+    from .client import run_test_app
+    return run_test_app(cfg, args.name)
+
+
+def cmd_test_terminal(cfg, args) -> int:
+    from .client import run_test_terminal
+    return run_test_terminal(cfg, args.file, doublet_name=args.doublet, out_path=args.output)
 
 
 def cmd_engines(cfg, args) -> int:
@@ -404,6 +456,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("action", choices=["list", "fetch", "voices"])
     p.add_argument("--kind", choices=["stt", "tts"], help="fetch: only this kind")
     p.set_defaults(func=cmd_engines)
+    sub.add_parser("serve", help="run the doublet voice service on Zenoh").set_defaults(func=cmd_serve)
+    sub.add_parser("doublets", help="list open doublets").set_defaults(func=cmd_doublets)
+    p = sub.add_parser("test-app", help="test app: answers 'You said: ...'")
+    p.add_argument("--name", default="echo")
+    p.set_defaults(func=cmd_test_app)
+    p = sub.add_parser("test-terminal", help="test terminal: speak a WAV into a doublet")
+    p.add_argument("file")
+    p.add_argument("--doublet", help="doublet name or id (default: the first free one)")
+    p.add_argument("-o", "--output", default="reply.wav")
+    p.set_defaults(func=cmd_test_terminal)
     p = sub.add_parser("say", help="synthesize text to a WAV with the TTS engine")
     p.add_argument("text")
     p.add_argument("-o", "--output", default="say.wav")

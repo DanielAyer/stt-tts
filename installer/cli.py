@@ -165,9 +165,9 @@ def run(args) -> int:
     advice = core.spool_advice(cfg["paths"]["spool_dir"])
     for note in plan.warnings:
         print("\nWarning: " + note)
-    print("\nDone. Next steps:")
+    print("\nNext steps:")
     print("  stt-tts say 'Hello there.' -o hello.wav   # try the TTS engine")
-    print("  stt-tts transcribe clip.wav       # try the STT engine (16 kHz mono WAV)")
+    print("  stt-tts transcribe clip.wav       # try the STT engine (any WAV)")
     print("  stt-tts demo                      # walk the button state machine")
     print("  stt-tts setup engines             # change engines later")
     print("  stt-tts config show               # see every setting")

@@ -15,6 +15,7 @@ TTS options ([tts.moonshine]):
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import moonshine_voice as mv
@@ -75,49 +76,70 @@ def fetch_tts(cfg: dict, progress) -> None:
     tts.close()
 
 
+_TRANSCRIBERS: dict = {}
+_LOCK = threading.RLock()  # one model in memory, shared by every stream; calls take turns
+
+
+def _shared_transcriber(cfg: dict, opts: dict):
+    key = (str(_root(cfg)), opts["language"], opts["model"])
+    with _LOCK:
+        if key not in _TRANSCRIBERS:
+            path, arch = mv.get_model_for_language(opts["language"], _arch(opts["model"]),
+                                                   cache_root=_root(cfg),
+                                                   on_progress=lambda *_: None)
+            _TRANSCRIBERS[key] = mv.Transcriber(path, arch)
+        return _TRANSCRIBERS[key]
+
+
 class MoonshineSTT(STTEngine):
+    """One utterance stream per instance; the model itself is loaded once and shared."""
+
     def __init__(self, cfg: dict, opts: dict | None = None) -> None:
         super().__init__(cfg, opts)
-        path, arch = mv.get_model_for_language(self.opts["language"], _arch(self.opts["model"]),
-                                               cache_root=_root(cfg),
-                                               on_progress=lambda *_: None)
-        self.transcriber = mv.Transcriber(path, arch)
+        self.transcriber = _shared_transcriber(cfg, self.opts)
         self.rate = cfg["input"]["sample_rate"]
         self._stream = None
         self._partial = ""
 
     def _start(self) -> None:
-        self._stream = self.transcriber.create_stream()
-        self._stream.start()
+        with _LOCK:
+            self._stream = self.transcriber.create_stream()
+            self._stream.start()
         self._partial = ""
 
     def feed(self, pcm: bytes) -> str | None:
         if self._stream is None:
             self._start()
-        self._stream.add_audio(pcm16_to_floats(pcm), self.rate)  # updates on its own cadence
+        samples = pcm16_to_floats(pcm)
+        with _LOCK:
+            self._stream.add_audio(samples, self.rate)  # updates on its own cadence
         return None
 
     def update(self) -> str:
         """Current partial transcript (in-progress; it will change)."""
         if self._stream is None:
             return ""
-        text = _text(self._stream.update_transcription())
+        with _LOCK:
+            text = _text(self._stream.update_transcription())
         self._partial = text
         return text
 
     def finalize(self) -> str:
         if self._stream is None:
             return ""
-        transcript = self._stream.stop()  # transcribes the audio still buffered
-        text = _text(transcript) if transcript is not None else self._partial
-        self._stream.close()
+        with _LOCK:
+            transcript = self._stream.stop()  # transcribes the audio still buffered
+            text = _text(transcript) if transcript is not None else self._partial
+            self._stream.close()
         self._stream = None
         return text
 
     def close(self) -> None:
+        """Close this stream; the shared model stays loaded for other streams."""
         if self._stream is not None:
-            self._stream.close()
-        self.transcriber.close()
+            with _LOCK:
+                self._stream.close()
+            self._stream = None
 
 
 def _text(transcript) -> str:

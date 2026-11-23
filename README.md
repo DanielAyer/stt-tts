@@ -300,6 +300,53 @@ Limits to know:
 - **The admin space must be readable.** It is by default.
 - **Layout varies by Zenoh version.** The parser expects the 1.x layout.
 
+## Voice service (doublets)
+
+`stt-tts serve` turns the module into a shared voice hook on Zenoh. Any app (an LLM bridge, a script) asks the service for a **doublet**: a private pair of streams, text on the app's side and audio on the terminal's side. A terminal (the phone app now, a standalone device later) lists the open doublets, picks one, and attaches its mic and speaker. The service runs the button state machine, speech to text and text to speech for each doublet.
+
+```bash
+stt-tts serve                         # on the voice server; needs eclipse-zenoh and a router
+stt-tts doublets                      # list open doublets from any machine on the router
+```
+
+**Locked to publish, open to listen.** Only the app that registered a doublet can send it text to speak, and only one terminal at a time can attach and send audio or presses. Anyone on the router can listen to a doublet's streams. Each publish carries the sender's token (from registration or attach) in its Zenoh attachment; anything without the right token is ignored. Tokens are not encrypted on the wire: run TLS on the router (see [Certificates](#certificates)), and keep the router off the internet.
+
+**Lifetimes.** The app and the terminal each hold a Zenoh liveliness token. If the app goes away the service closes the doublet; if the terminal goes away the lock is released for another terminal.
+
+### Keys
+
+`<p>` is `service.prefix` (default `stt-tts`); `<id>` is the doublet id the service assigns.
+
+| Key | Kind | Who writes | Payload |
+| --- | --- | --- | --- |
+| `<p>/register` | query | app | `{"name": "..."}` → id, `app_token`, the doublet's keys and formats |
+| `<p>/doublets` | query | anyone | list of open doublets: id, name, state, whether a terminal holds it |
+| `<p>/d/<id>/attach` | query | terminal | `{"terminal": "name"}` → `terminal_token`, or refused with `held_by` |
+| `<p>/d/<id>/detach` | query | terminal | `{"terminal_token": "..."}` |
+| `<p>/d/<id>/control` | pub | terminal | `{"op": "press"}` (the one context-sensitive button) |
+| `<p>/d/<id>/audio/in` | pub | terminal | 16 kHz mono 16-bit PCM, encoding `audio/L16;rate=16000` |
+| `<p>/d/<id>/text/out` | pub | service | `{"text", "doublet", "terminal", "t"}` when you finish speaking |
+| `<p>/d/<id>/text/in` | pub | app | UTF-8 text to speak |
+| `<p>/d/<id>/audio/out` | pub | service | PCM at the TTS rate, encoding `audio/L16;rate=24000`, paced in real time |
+| `<p>/d/<id>/events` | pub | service | `listening`, `partial`, `thinking`, `speaking`, `interrupted` (with `spoken_text`), `playback_done`, `idle`, `reply_cancelled`, `reply_dropped`, `closed` |
+| `<p>/live/<id>/app`, `.../term` | liveliness | app, terminal | presence |
+
+A terminal should drop any audio it has buffered when it gets `interrupted`. The registration reply has a `server_public_key` field, `null` for now, reserved for end-to-end encryption.
+
+### Trying it without a phone
+
+```bash
+stt-tts test-app --name echo                     # a stand-in LLM: replies "You said: ..."
+stt-tts test-terminal clip.wav --doublet echo -o reply.wav
+```
+
+`test-terminal` presses the button, streams the WAV in real time, presses again, and saves the spoken reply. It prints the transcript and the time from releasing the button to the first reply audio.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `service.prefix` | `stt-tts` | root of every key above |
+| `service.app_grace_s` | `30` | close a doublet if its app hasn't been seen for this long |
+
 ## Certificates
 
 `stt-tts certs` is a small private certificate authority (CA), built on the `openssl` command. One CA signs every certificate in your setup, so each part trusts the others by checking against that one CA.
@@ -356,7 +403,7 @@ The main workflow (`stt_tts/pipeline.py`) is complete; every endpoint it calls i
 | Audio capture | `AudioInput` | `stub_mic` emits silence | `stt_tts/adapters/stub.py` |
 | Audio playback | `AudioOutput` | `stub_speaker` counts bytes | `stt_tts/adapters/stub.py` |
 | Button | `ControlInput` | `stub_button` never presses | `stt_tts/adapters/stub.py` |
-| Zenoh adapters | all five | written for zenoh 1.x, untested against a router | `stt_tts/adapters/zenoh_adapter.py` |
+| Zenoh adapters (single-pipeline mode) | all five | written for zenoh 1.x; the doublet service is tested against a router, these are not | `stt_tts/adapters/zenoh_adapter.py` |
 | LLM network call | `LLMBridge.send` | request built and validated; reply is a placeholder | `stt_tts/adapters/llm_http.py` |
 | Output sealing | `Sealer.seal` | settings saved; not implemented | `stt_tts/security.py` |
 | Live capture and playback threads | pipeline | synchronous | `stt_tts/pipeline.py` |
@@ -416,4 +463,10 @@ tests/                  unit tests (standard library only)
 - Physical button adapter
 - Verbal observer: say "Obs, ..." to edit or read back pending input before it's sent
 - Optional echo cancellation, for opening the mic during playback
+- End-to-end encryption of doublet traffic (app ↔ service ↔ terminal), using the reserved `server_public_key` field
+- `stt-tts-group`: an overlay for group conversations ("party channel"): queuing, per-speaker streams, turn-taking
+- Queuing and extra service instances when many doublets are busy at once
+- Android phone app as a doublet terminal
+- Let an app speak first when its doublet is idle (notifications, reminders)
+- Run `stt-tts serve` as a systemd service
 - Choose a license
