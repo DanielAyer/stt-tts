@@ -127,14 +127,6 @@ DEFAULTS: dict[str, Any] = {
         "client_cert": "",
         "client_key": "",
     },
-    "service": {
-        # `stt-tts serve`: the doublet voice service on Zenoh (see stt_tts/protocol.py)
-        "prefix": "stt-tts",
-        # Doublet ids: "readable" = <app>/<n> (e.g. echo/1), "opaque" = random UUID
-        "naming": "readable",
-        # Seconds a new doublet waits for its app's liveliness token before closing
-        "app_grace_s": 30,
-    },
     "zenoh": {
         "enabled": False,
         "mode": "client",

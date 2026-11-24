@@ -1,0 +1,259 @@
+"""Configuration: defaults, load, save, and dotted-key get/set.
+
+The config file is TOML. Every user-selectable endpoint (input sources,
+output destinations, engines, Zenoh keys, paths) lives here, so a
+command-line install can take all defaults and be changed later with:
+
+    stt-tts config set zenoh.keys.out_text my/robot/transcript
+"""
+
+from __future__ import annotations
+
+import copy
+import os
+import tomllib
+from pathlib import Path
+from typing import Any
+
+HOME = Path.home()
+
+
+def _xdg(var: str, fallback: Path) -> Path:
+    value = os.environ.get(var)
+    return Path(value) if value else fallback
+
+
+def default_spool_dir() -> Path:
+    """Prefer the dedicated tmpfs mount; else the per-user runtime dir (tmpfs on systemd)."""
+    dedicated = Path("/mnt/voice-spool")
+    if dedicated.is_dir() and os.access(dedicated, os.W_OK):
+        return dedicated
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime:
+        return Path(runtime) / "stt-tts"
+    return Path("/tmp") / f"stt-tts-{os.getuid()}"
+
+
+def default_paths() -> dict[str, str]:
+    data = _xdg("XDG_DATA_HOME", HOME / ".local" / "share") / "stt-tts"
+    return {
+        "app_dir": str(HOME / ".local" / "opt" / "stt-tts"),
+        "data_dir": str(data),
+        "model_dir": str(data / "models"),
+        "transcript_dir": str(data / "transcripts"),
+        "log_dir": str(data / "logs"),
+        "pki_dir": str(data / "pki"),
+        "spool_dir": str(default_spool_dir()),
+    }
+
+
+def config_path() -> Path:
+    override = os.environ.get("STT_TTS_CONFIG")
+    if override:
+        return Path(override)
+    return _xdg("XDG_CONFIG_HOME", HOME / ".config") / "stt-tts" / "config.toml"
+
+
+def secrets_path() -> Path:
+    """Fallback secret store when no system keyring is available (owner-only file)."""
+    return config_path().parent / "secrets.json"
+
+
+DEFAULTS: dict[str, Any] = {
+    "paths": {},  # filled from default_paths() at load time
+    "control": {
+        # Where button presses come from: "stub_button", "keyboard", "zenoh"
+        "adapter": "stub_button",
+        # After a reply finishes playing: "idle" or "listening"
+        "after_reply": "idle",
+    },
+    "input": {
+        # Audio sources, all normalized to 16 kHz mono PCM: "stub_mic", "file", "zenoh"
+        "adapters": ["stub_mic"],
+        "sample_rate": 16000,
+    },
+    "output": {
+        # Audio destinations for TTS: "stub_speaker", "file", "zenoh"
+        "adapters": ["stub_speaker"],
+        # Small buffer keeps interrupts immediate
+        "buffer_ms": 300,
+    },
+    "text": {
+        # Where transcripts go: "stdout", "file", "zenoh"
+        "sinks": ["stdout"],
+        # Where text to speak comes from: "stdin", "zenoh"
+        "sources": ["stdin"],
+    },
+    # Engines are plugins (stt_tts/engines). "none" = stub, bring your own.
+    # Per-engine options live in [stt.<engine>] / [tts.<engine>], e.g. [tts.kokoro].
+    "stt": {
+        "engine": "moonshine",  # moonshine | none
+    },
+    "tts": {
+        "engine": "moonshine",  # moonshine | kokoro | none
+        "sample_rate": 24000,   # set from the engine when it loads
+    },
+    "security": {
+        "input": {
+            # Allow-list overlay. Off = any device may send audio (open default).
+            # Forced on when an LLM is connected or an output uses a stored credential (see security.py).
+            "enabled": False,
+            # Identities allowed in, e.g. "cert:kitchen-mic" (certificate common name)
+            "allowed": [],
+            # Mic/button physically attached to this machine count as trusted
+            "local_trusted": True,
+        },
+        "output": {
+            # Sign-and-encrypt overlay for outputs that pass through untrusted hops
+            "seal": False,
+            "apply_to": ["zenoh", "file"],
+            # Recipient public keys (files); messages are encrypted to each one
+            "recipients": [],
+        },
+    },
+    "llm": {
+        # Optional profile: OpenAI-compatible HTTP endpoint (llama.cpp, Ollama, vLLM, cloud)
+        "enabled": False,
+        "backend": "llama.cpp",
+        "base_url": "http://localhost:8080/v1",
+        "model": "",
+        "system_prompt": "",
+        "stream": True,
+        # Name of the stored secret holding the API key ("" = no key needed)
+        "api_key_secret": "",
+        # HTTPS: required for any non-local host
+        "verify_tls": True,
+        "ca_file": "",
+        "client_cert": "",
+        "client_key": "",
+    },
+    "service": {
+        # `stt-tts serve`: the doublet voice service on Zenoh (see stt_tts/protocol.py)
+        "prefix": "stt-tts",
+        # Doublet ids: "readable" = <app>/<n> (e.g. echo/1), "opaque" = random UUID
+        "naming": "readable",
+        # Seconds a new doublet waits for its app's liveliness token before closing
+        "app_grace_s": 30,
+    },
+    "zenoh": {
+        "enabled": False,
+        "mode": "client",
+        "connect": ["tcp/localhost:7447"],
+        "tls": {
+            # Mutual TLS: required for allow-listing Zenoh devices by certificate
+            "enabled": False,
+            "root_ca": "",
+            "cert": "",
+            "key": "",
+        },
+        "keys": {
+            "in_audio": "voice/in/audio",
+            "in_control": "voice/in/control",
+            "out_text": "voice/out/text",
+            "tts_text": "voice/tts/text",
+            "tts_audio": "voice/tts/audio",
+            "events": "voice/events",
+        },
+    },
+}
+
+
+def defaults() -> dict[str, Any]:
+    cfg = copy.deepcopy(DEFAULTS)
+    cfg["paths"] = default_paths()
+    return cfg
+
+
+def _merge(base: dict, override: dict) -> dict:
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _merge(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+def load(path: Path | None = None) -> dict[str, Any]:
+    """Defaults overlaid with the user's file, so new keys always have a value."""
+    path = path or config_path()
+    cfg = defaults()
+    if path.exists():
+        with path.open("rb") as fh:
+            user = tomllib.load(fh)
+        _merge(cfg, user)
+        # Paths added in later versions follow the user's data store
+        user_paths = user.get("paths", {})
+        if "data_dir" in user_paths and "pki_dir" not in user_paths:
+            cfg["paths"]["pki_dir"] = str(Path(user_paths["data_dir"]) / "pki")
+    return cfg
+
+
+# --- Minimal TOML writer (stdlib has a reader only) -------------------------
+
+def _toml_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(v) for v in value) + "]"
+    raise TypeError(f"Unsupported config value: {value!r}")
+
+
+def dumps(cfg: dict[str, Any]) -> str:
+    lines: list[str] = ["# stt-tts configuration", ""]
+
+    def section(name: str, table: dict[str, Any]) -> None:
+        scalars = {k: v for k, v in table.items() if not isinstance(v, dict)}
+        tables = {k: v for k, v in table.items() if isinstance(v, dict)}
+        if scalars:
+            lines.append(f"[{name}]")
+            for key, value in scalars.items():
+                lines.append(f"{key} = {_toml_value(value)}")
+            lines.append("")
+        for key, sub in tables.items():
+            section(f"{name}.{key}", sub)
+
+    for name, table in cfg.items():
+        section(name, table)
+    return "\n".join(lines)
+
+
+def save(cfg: dict[str, Any], path: Path | None = None) -> Path:
+    path = path or config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(dumps(cfg))
+    return path
+
+
+def get(cfg: dict[str, Any], dotted: str) -> Any:
+    node: Any = cfg
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            raise KeyError(dotted)
+        node = node[part]
+    return node
+
+
+def set_value(cfg: dict[str, Any], dotted: str, raw: str) -> Any:
+    """Set a dotted key, coercing the string to the existing value's type."""
+    *parents, leaf = dotted.split(".")
+    node = cfg
+    for part in parents:
+        node = node.setdefault(part, {})
+    current = node.get(leaf)
+    if isinstance(current, bool):
+        value: Any = raw.strip().lower() in ("1", "true", "yes", "on")
+    elif isinstance(current, int):
+        value = int(raw)
+    elif isinstance(current, float):
+        value = float(raw)
+    elif isinstance(current, list):
+        value = [item.strip() for item in raw.split(",") if item.strip()]
+    else:
+        value = raw
+    node[leaf] = value
+    return value
